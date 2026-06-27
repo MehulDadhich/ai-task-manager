@@ -26,18 +26,47 @@ app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173', cred
 app.use(express.json());
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 100 }));
 
-// Routes
+// ── Routes ────────────────────────────────────────────────────────────────────
 app.use('/api/tasks', taskRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/notifications', notificationRoutes);
 
-app.get('/api/health', (_, res) => res.json({ status: 'ok' }));
+// Root route — fixes "Cannot GET /" when you open localhost:5000 in browser
+app.get('/', (_, res) => {
+  res.json({
+    status: 'ok',
+    message: '🚀 AI Task Manager Backend is running',
+    version: '1.0.0',
+    endpoints: {
+      health: '/api/health',
+      tasks: '/api/tasks',
+      ai: '/api/ai',
+      notifications: '/api/notifications',
+    },
+  });
+});
 
-// Socket.IO
+app.get('/api/health', (_, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: `Route ${req.method} ${req.url} not found` });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// ── Socket.IO ─────────────────────────────────────────────────────────────────
 initializeSocket(io);
 
-// Cron: check reminders every minute
+// ── Cron: check reminders every minute ───────────────────────────────────────
 cron.schedule('* * * * *', () => checkReminders(io));
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`\n🚀 Backend running on http://localhost:${PORT}\n`));
+server.listen(PORT, () => {
+  console.log(`\n🚀 Backend running on http://localhost:${PORT}`);
+  console.log(`📋 API docs: http://localhost:${PORT}/\n`);
+});

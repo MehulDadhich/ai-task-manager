@@ -28,9 +28,12 @@ export const getTasks = async (userId) => {
         ...data,
         createdAt: data.createdAt?.toDate?.() ?? data.createdAt,
         updatedAt: data.updatedAt?.toDate?.() ?? data.updatedAt,
+        // dueDate: keep as ISO string for easy comparison
         dueDate: data.dueDate
           ? (data.dueDate.toDate ? data.dueDate.toDate().toISOString() : data.dueDate)
           : null,
+        // completedDate: stored as plain "YYYY-MM-DD" string — no conversion needed
+        completedDate: data.completedDate ?? null,
       });
     });
     return tasks;
@@ -47,6 +50,7 @@ export const createTask = async (taskData) => {
       createdAt: Timestamp.now(),
       updatedAt: Timestamp.now(),
       dueDate: taskData.dueDate ? Timestamp.fromDate(new Date(taskData.dueDate)) : null,
+      completedDate: null,
     };
     const docRef = await addDoc(collection(db, 'tasks'), taskToCreate);
     return {
@@ -54,6 +58,7 @@ export const createTask = async (taskData) => {
       ...taskData,
       createdAt: new Date(),
       updatedAt: new Date(),
+      completedDate: null,
     };
   } catch (error) {
     console.error('Create task error:', error);
@@ -65,7 +70,8 @@ export const updateTask = async (taskId, updates) => {
   try {
     const taskRef = doc(db, 'tasks', taskId);
     const updateData = { ...updates, updatedAt: Timestamp.now() };
-    if (updates.dueDate) {
+    // Convert dueDate to Timestamp only if it's being updated and is a string/Date
+    if (updates.dueDate && typeof updates.dueDate === 'string') {
       updateData.dueDate = Timestamp.fromDate(new Date(updates.dueDate));
     }
     await updateDoc(taskRef, updateData);

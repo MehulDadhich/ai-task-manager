@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { getTasks, createTask, updateTask, deleteTask } from '../services/firebaseDB';
@@ -13,7 +13,7 @@ import {
   Briefcase, User, Heart, Book, Brain
 } from 'lucide-react';
 
-// ── Animated canvas background ──────────────────────────────────────────────
+// ── Animated canvas background ───────────────────────────────────────────────
 const AnimatedBackground = () => {
   const canvasRef = useRef(null);
   useEffect(() => {
@@ -79,7 +79,7 @@ const AnimatedBackground = () => {
 const detectCategory = (title) => {
   const t = title.toLowerCase();
   if (['meeting','client','project','work','office','presentation','email','report'].some(k => t.includes(k))) return 'work';
-  if (['gym','exercise','doctor','hospital','health','medicine','workout','run'].some(k => t.includes(k))) return 'health';
+  if (['gym','exercise','doctor','hospital','health','medicine','workout','run','yoga'].some(k => t.includes(k))) return 'health';
   if (['study','learn','course','book','read','research','exam','homework'].some(k => t.includes(k))) return 'learning';
   return 'personal';
 };
@@ -116,6 +116,21 @@ const getCategoryColor = (cat) => ({
   learning: 'bg-green-100 text-green-700 border-green-300',
 }[cat] || 'bg-gray-100 text-gray-700 border-gray-300');
 
+// ── Key helper: get today's date string "YYYY-MM-DD" ────────────────────────
+const todayStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+// ── Check if a daily task was completed on a PREVIOUS day (so it should reset) ──
+const dailyTaskShouldReset = (task) => {
+  if (!task.tags?.includes('daily')) return false;
+  if (task.status !== 'done') return false;
+  const completedOn = task.completedDate; // we store this when completing
+  if (!completedOn) return true; // no date stored → assume old, reset it
+  return completedOn !== todayStr(); // completed on a different day → reset
+};
+
 // ── Dashboard ────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -133,6 +148,32 @@ export default function Dashboard() {
     loadTasks();
   }, [isAuthenticated, token]);
 
+  // ── Check every minute if a new day started and reset daily tasks ──────────
+  useEffect(() => {
+    const resetDailyTasks = async () => {
+      const toReset = tasks.filter(dailyTaskShouldReset);
+      if (toReset.length === 0) return;
+
+      const updated = await Promise.all(
+        toReset.map(async (t) => {
+          await updateTask(t.id, { status: 'todo', completedDate: null });
+          return { ...t, status: 'todo', completedDate: null };
+        })
+      );
+
+      setTasks(prev =>
+        prev.map(t => {
+          const reset = updated.find(u => u.id === t.id);
+          return reset || t;
+        })
+      );
+    };
+
+    resetDailyTasks(); // run immediately on load
+    const interval = setInterval(resetDailyTasks, 60 * 1000); // check every minute
+    return () => clearInterval(interval);
+  }, [tasks]);
+
   const loadTasks = async () => {
     try {
       if (user?.uid) {
@@ -147,13 +188,12 @@ export default function Dashboard() {
     e.preventDefault();
     if (!newTaskInput.trim()) { toast.error('Please enter a task'); return; }
     try {
-      let priority, category, dueDate = null, aiAnalyzed = false;
+      let priority, category, dueDate = null;
       try {
         const aiResult = await analyzeTaskPriority(newTaskInput);
         priority = aiResult.priority;
         category = aiResult.category || detectCategory(newTaskInput);
         dueDate = aiResult.dueDate || parseNaturalDate(newTaskInput);
-        aiAnalyzed = true;
       } catch {
         priority = detectPriority(newTaskInput);
         category = detectCategory(newTaskInput);
@@ -173,12 +213,12 @@ export default function Dashboard() {
         dueDate,
         isRecurring: isDaily,
         recurrencePattern: isDaily ? 'daily' : null,
-        aiAnalyzed,
+        completedDate: null,
       };
 
       const created = await createTask(taskData);
       setTasks(prev => [created, ...prev]);
-      toast.success(`✓ Task added! Priority: ${priority} | Category: ${category}${aiAnalyzed ? ' | ✨ AI' : ''}`);
+      toast.success(`✓ Task added! Priority: ${priority} | Category: ${category}`);
       setNewTaskInput('');
       setTimeout(loadTasks, 500);
     } catch { toast.error('Failed to create task'); }
@@ -195,13 +235,20 @@ export default function Dashboard() {
   const handleStatusChange = async (id, newStatus) => {
     try {
       const task = tasks.find(t => t.id === id);
-      await updateTask(id, { status: newStatus });
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, status: newStatus } : t));
+      const updates = { status: newStatus };
+
+      // When completing a daily task, store today's date so we know when to reset
       if (newStatus === 'done' && task?.tags?.includes('daily')) {
-        toast.success('✓ Daily task completed! It will repeat tomorrow.');
-      } else if (newStatus === 'done') {
-        toast.success('✓ Task completed!');
+        updates.completedDate = todayStr();
+        await updateTask(id, updates);
+        setTasks(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+        toast.success('✓ Daily task completed! Will reset tomorrow.');
+        return;
       }
+
+      await updateTask(id, updates);
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+      if (newStatus === 'done') toast.success('✓ Task completed!');
       setTimeout(loadTasks, 500);
     } catch { toast.error('Failed to update task'); }
   };
@@ -215,6 +262,7 @@ export default function Dashboard() {
     } catch { toast.error('Logout failed'); }
   };
 
+  // ── Time helper ──────────────────────────────────────────────────────────
   const getTimeMin = (task) => {
     if (task.dueDate) {
       const d = new Date(task.dueDate);
@@ -230,36 +278,59 @@ export default function Dashboard() {
     return 9999;
   };
 
+  // ── Filtering ────────────────────────────────────────────────────────────
   const getFilteredTasks = () => {
-    let f = tasks;
+    let f = [...tasks];
     const now = new Date();
+
     switch (filter) {
       case 'ACTIVE':
-        f = f.filter(t => t.tags?.includes('daily') || t.status !== 'done');
-        break;
-      case 'UPCOMING':
-        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        const tomorrow = new Date(today); tomorrow.setDate(tomorrow.getDate() + 1);
+        // Daily tasks: always show in ACTIVE (completed ones show as done visually but stay here)
+        // Regular tasks: hide when done
         f = f.filter(t => {
           if (t.tags?.includes('daily')) return true;
-          if (t.dueDate) return new Date(new Date(t.dueDate).setHours(0,0,0,0)) >= tomorrow.getTime();
+          return t.status !== 'done';
+        });
+        break;
+
+      case 'UPCOMING': {
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const tomorrowStart = new Date(todayStart);
+        tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+        f = f.filter(t => {
+          // Daily tasks always show in upcoming
+          if (t.tags?.includes('daily')) return true;
+          if (t.dueDate) {
+            const dd = new Date(t.dueDate);
+            return dd >= tomorrowStart;
+          }
           return false;
         });
         break;
+      }
+
       case 'HIGH':
         f = f.filter(t => t.priority === 'high' && t.status !== 'done');
         break;
     }
+
     f.sort((a, b) => getTimeMin(a) - getTimeMin(b));
+
     if (searchQuery.trim()) {
       f = f.filter(t => t.title.toLowerCase().includes(searchQuery.toLowerCase()));
     }
     return f;
   };
 
+  // ── Stats ────────────────────────────────────────────────────────────────
   const totalTasks = tasks.length;
+  // Count ALL completed tasks including daily ones (they stay 'done' until next day)
   const completedTasks = tasks.filter(t => t.status === 'done').length;
-  const activeTasks = tasks.filter(t => t.status !== 'done').length;
+  // Active = incomplete non-daily tasks + all daily tasks (daily always show in active)
+  const activeTasks = tasks.filter(t => {
+    if (t.tags?.includes('daily')) return true; // daily always counts as active
+    return t.status !== 'done';
+  }).length;
   const highPriorityCount = tasks.filter(t => t.priority === 'high' && t.status !== 'done').length;
   const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
@@ -275,13 +346,14 @@ export default function Dashboard() {
     learning: tasks.filter(t => t.category === 'learning').length,
   };
 
+  // ── AI Day Planner: show today's upcoming + daily tasks ──────────────────
   const now = new Date();
   const todaySchedule = tasks
     .filter(t => {
-      if (t.status === 'done') return false;
+      if (t.status === 'done' && !t.tags?.includes('daily')) return false;
       if (t.tags?.includes('daily')) {
         const m = t.title.match(/at (\d{1,2})\s*(am|pm)/i);
-        if (!m) return false;
+        if (!m) return true; // daily task without time → always show
         let h = parseInt(m[1]);
         if (m[2].toLowerCase() === 'pm' && h !== 12) h += 12;
         if (m[2].toLowerCase() === 'am' && h === 12) h = 0;
@@ -315,24 +387,24 @@ export default function Dashboard() {
       <AnimatedBackground />
       <AlarmSystem tasks={tasks} />
 
-      {/* Sidebar */}
+      {/* ── Sidebar ──────────────────────────────────────────────────── */}
       <div className="w-20 bg-white/80 backdrop-blur-xl border-r border-gray-200 relative z-10 flex flex-col items-center py-6 shadow-lg">
         <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-xl flex items-center justify-center mb-8 shadow-lg">
           <Brain className="w-7 h-7 text-white" />
         </div>
         <nav className="flex-1 flex flex-col items-center space-y-4">
           {[
-            { view: 'tasks', Icon: Home, active: 'blue' },
-            { view: 'completed', Icon: CheckSquare, active: 'green' },
-            { view: 'analytics', Icon: BarChart3, active: 'purple' },
-          ].map(({ view, Icon, active }) => (
+            { view: 'tasks', Icon: Home, color: 'blue' },
+            { view: 'completed', Icon: CheckSquare, color: 'green' },
+            { view: 'analytics', Icon: BarChart3, color: 'purple' },
+          ].map(({ view, Icon, color }) => (
             <button
               key={view}
               onClick={() => setActiveView(view)}
               title={view.charAt(0).toUpperCase() + view.slice(1)}
               className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all ${
                 activeView === view
-                  ? `bg-${active}-600 text-white shadow-lg`
+                  ? `bg-${color}-600 text-white shadow-lg`
                   : 'text-gray-600 hover:bg-gray-100'
               }`}
             >
@@ -342,7 +414,7 @@ export default function Dashboard() {
         </nav>
       </div>
 
-      {/* Main */}
+      {/* ── Main content ─────────────────────────────────────────────── */}
       <div className="flex-1 relative z-10 flex flex-col">
         {/* Header */}
         <header className="bg-white/80 backdrop-blur-xl border-b border-gray-200 sticky top-0 z-50 shadow-sm">
@@ -368,29 +440,32 @@ export default function Dashboard() {
 
         <div className="flex-1 overflow-y-auto p-8">
 
-          {/* ── TASKS VIEW ───────────────────────────────────── */}
+          {/* ════════════════════════════════════════════════
+              TASKS VIEW
+          ════════════════════════════════════════════════ */}
           {activeView === 'tasks' && (
             <div className="max-w-6xl mx-auto space-y-6">
+
               {/* Stats */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 {[
-                  { label: 'Total Tasks', value: totalTasks, Icon: Target, color: 'blue', width: 100, rate: 100 },
-                  { label: 'Completed', value: completedTasks, Icon: CheckCircle2, color: 'green', width: completionRate, rate: completionRate },
-                  { label: 'Active', value: activeTasks, Icon: Clock, color: 'orange', width: null },
-                  { label: 'High Priority', value: highPriorityCount, Icon: AlertCircle, color: 'red', width: null },
-                ].map(({ label, value, Icon, color, width, rate }) => (
+                  { label: 'Total Tasks', value: totalTasks, Icon: Target, color: 'blue', showBar: true, barWidth: 100, barRate: 100 },
+                  { label: 'Completed', value: completedTasks, Icon: CheckCircle2, color: 'green', showBar: true, barWidth: completionRate, barRate: completionRate },
+                  { label: 'Active', value: activeTasks, Icon: Clock, color: 'orange', showBar: false },
+                  { label: 'High Priority', value: highPriorityCount, Icon: AlertCircle, color: 'red', showBar: false },
+                ].map(({ label, value, Icon, color, showBar, barWidth, barRate }) => (
                   <div key={label} className={`bg-white/90 backdrop-blur-lg rounded-2xl p-6 border-2 border-${color}-200 shadow-lg`}>
                     <div className="flex items-center justify-between mb-3">
                       <h3 className="text-sm font-bold text-gray-600">{label}</h3>
                       <Icon className={`w-6 h-6 text-${color}-600`} />
                     </div>
                     <p className="text-4xl font-black text-gray-900">{value}</p>
-                    {width !== null && (
+                    {showBar && (
                       <div className="mt-2 flex items-center gap-2">
                         <div className={`flex-1 h-2 bg-${color}-100 rounded-full overflow-hidden`}>
-                          <div className={`h-full bg-${color}-600 rounded-full`} style={{ width: `${width}%` }} />
+                          <div className={`h-full bg-${color}-600 rounded-full transition-all`} style={{ width: `${barWidth}%` }} />
                         </div>
-                        <span className={`text-xs font-bold text-${color}-600`}>{rate}%</span>
+                        <span className={`text-xs font-bold text-${color}-600`}>{barRate}%</span>
                       </div>
                     )}
                   </div>
@@ -404,7 +479,7 @@ export default function Dashboard() {
                     type="text"
                     value={newTaskInput}
                     onChange={e => setNewTaskInput(e.target.value)}
-                    placeholder="Add a task... (e.g., 'urgent client meeting at 3pm today')"
+                    placeholder="Add a task... (e.g., 'urgent client meeting at 3pm today', 'daily gym at 7am')"
                     className="flex-1 px-5 py-3 border-2 border-gray-300 rounded-xl focus:border-blue-600 focus:ring-4 focus:ring-blue-500/20 outline-none font-medium transition-all"
                   />
                   <button
@@ -415,7 +490,7 @@ export default function Dashboard() {
                   </button>
                 </form>
                 <p className="text-xs text-gray-500 mt-3">
-                  💡 AI auto-detects priority and category. Try: "daily gym at 7am", "urgent report deadline today"
+                  💡 AI auto-detects priority & category. Include "daily" for recurring tasks (e.g. "daily gym at 7am")
                 </p>
               </div>
 
@@ -436,20 +511,22 @@ export default function Dashboard() {
                     {showAIPlanner ? 'Hide' : 'Show'}
                   </button>
                 </div>
+
                 {showAIPlanner && (
                   <div className="space-y-3 mt-4">
                     {todaySchedule.length === 0 ? (
                       <div className="text-center py-8 text-white/80">
                         <Calendar className="w-12 h-12 mx-auto mb-3 opacity-50" />
                         <p className="font-medium">No tasks scheduled for today</p>
-                        <p className="text-sm mt-1 opacity-75">Add tasks with times like "meeting at 3pm today"</p>
+                        <p className="text-sm mt-1 opacity-75">Add tasks with times like "daily gym at 7am" or "meeting at 3pm today"</p>
                       </div>
                     ) : todaySchedule.map((task, idx) => {
                       let timeStr = task.dueDate
                         ? new Date(task.dueDate).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-                        : 'Daily Task';
+                        : '🔄 Daily';
                       const m = !task.dueDate && task.title.match(/at (\d{1,2})\s*(am|pm)/i);
-                      if (m) timeStr = `${m[1]} ${m[2].toUpperCase()}`;
+                      if (m) timeStr = `${m[1]} ${m[2].toUpperCase()} (Daily)`;
+
                       return (
                         <div key={task.id} className="bg-white/10 backdrop-blur-sm rounded-xl p-4 flex items-center justify-between border border-white/20 hover:bg-white/20 transition-colors">
                           <div className="flex items-center gap-4">
@@ -461,9 +538,10 @@ export default function Dashboard() {
                               </p>
                             </div>
                           </div>
-                          <span className={`px-3 py-1 rounded-full text-xs font-bold ${
-                            task.priority === 'high' ? 'bg-red-500/30' : task.priority === 'medium' ? 'bg-yellow-500/30' : 'bg-green-500/30'
-                          } text-white`}>
+                          <span className={`px-3 py-1 rounded-full text-xs font-bold text-white ${
+                            task.priority === 'high' ? 'bg-red-500/40' :
+                            task.priority === 'medium' ? 'bg-yellow-500/40' : 'bg-green-500/40'
+                          }`}>
                             {task.priority?.toUpperCase()}
                           </span>
                         </div>
@@ -473,7 +551,7 @@ export default function Dashboard() {
                 )}
               </div>
 
-              {/* Filters */}
+              {/* Filters + Search */}
               <div className="bg-white/90 backdrop-blur-lg rounded-2xl p-4 border-2 border-gray-200 shadow-lg">
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                   <div className="relative flex-1">
@@ -516,47 +594,64 @@ export default function Dashboard() {
                   return (
                     <div key={task.id} className="bg-white/90 backdrop-blur-lg rounded-xl p-5 border-2 border-gray-200 shadow-lg hover:shadow-xl transition-all group">
                       <div className="flex items-start gap-4">
+                        {/* Checkbox */}
                         <button
                           onClick={() => handleStatusChange(task.id, done ? 'todo' : 'done')}
-                          className={`mt-1 w-7 h-7 rounded-lg border-2 flex items-center justify-center transition-all ${
+                          className={`mt-1 w-7 h-7 rounded-lg border-2 flex items-center justify-center transition-all flex-shrink-0 ${
                             done ? 'bg-green-600 border-green-600' : 'border-gray-300 hover:border-green-500'
                           }`}
                         >
                           {done && <CheckCircle2 className="w-5 h-5 text-white" />}
                         </button>
+
+                        {/* Content */}
                         <div className="flex-1">
                           <p className={`font-bold text-lg mb-2 ${done ? 'line-through text-gray-400' : 'text-gray-900'}`}>
                             {task.title}
                           </p>
+
+                          {/* Badges — NO AI badge */}
                           <div className="flex flex-wrap gap-2">
+                            {/* Priority */}
                             <span className={`px-3 py-1 rounded-full text-xs font-bold ${
                               task.priority === 'high' ? 'bg-red-500 text-white' :
-                              task.priority === 'medium' ? 'bg-orange-500 text-white' : 'bg-green-500 text-white'
+                              task.priority === 'medium' ? 'bg-orange-500 text-white' :
+                              'bg-green-500 text-white'
                             }`}>
                               {task.priority?.toUpperCase()}
                             </span>
+
+                            {/* Category */}
                             {task.category && (
                               <span className={`px-3 py-1 rounded-full text-xs font-bold border-2 flex items-center gap-1 ${getCategoryColor(task.category)}`}>
-                                <CatIcon className="w-3 h-3" /> {task.category?.toUpperCase()}
+                                <CatIcon className="w-3 h-3" /> {task.category.toUpperCase()}
                               </span>
                             )}
+
+                            {/* Daily badge */}
                             {task.tags?.includes('daily') && (
-                              <span className="px-3 py-1 rounded-full text-xs font-bold bg-purple-500 text-white">🔄 DAILY</span>
+                              <span className="px-3 py-1 rounded-full text-xs font-bold bg-purple-500 text-white flex items-center gap-1">
+                                🔄 DAILY
+                              </span>
                             )}
+
+                            {/* Due date */}
                             {task.dueDate && (
                               <span className="px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700 border-2 border-blue-300 flex items-center gap-1">
                                 <Clock className="w-3 h-3" />
-                                {new Date(task.dueDate).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })}
+                                {new Date(task.dueDate).toLocaleString('en-US', {
+                                  month: 'short', day: 'numeric',
+                                  hour: 'numeric', minute: '2-digit', hour12: true
+                                })}
                               </span>
-                            )}
-                            {task.aiAnalyzed && (
-                              <span className="px-3 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-700 border-2 border-indigo-300">✨ AI</span>
                             )}
                           </div>
                         </div>
+
+                        {/* Delete (on hover) */}
                         <button
                           onClick={() => handleDeleteTask(task.id)}
-                          className="p-2 text-red-600 hover:bg-red-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
+                          className="p-2 text-red-600 hover:bg-red-50 rounded-lg opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
                         >
                           <Trash2 className="w-5 h-5" />
                         </button>
@@ -568,7 +663,9 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* ── COMPLETED VIEW ────────────────────────────────── */}
+          {/* ════════════════════════════════════════════════
+              COMPLETED VIEW
+          ════════════════════════════════════════════════ */}
           {activeView === 'completed' && (
             <div className="max-w-6xl mx-auto">
               <div className="bg-white/90 backdrop-blur-lg rounded-2xl p-8 border-2 border-gray-200 shadow-lg">
@@ -588,7 +685,9 @@ export default function Dashboard() {
                         <CheckCircle2 className="w-6 h-6 text-green-600" />
                         <div>
                           <p className="font-bold text-gray-900 line-through">{task.title}</p>
-                          {task.dueDate && <p className="text-sm text-gray-600 mt-1">{new Date(task.dueDate).toLocaleString()}</p>}
+                          {task.completedDate && (
+                            <p className="text-xs text-gray-500 mt-0.5">Completed: {task.completedDate}</p>
+                          )}
                         </div>
                       </div>
                       <button
@@ -604,7 +703,9 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* ── ANALYTICS VIEW ────────────────────────────────── */}
+          {/* ════════════════════════════════════════════════
+              ANALYTICS VIEW
+          ════════════════════════════════════════════════ */}
           {activeView === 'analytics' && (
             <div className="max-w-6xl mx-auto">
               <div className="bg-white/90 backdrop-blur-lg rounded-2xl p-8 border-2 border-gray-200 shadow-lg">
@@ -612,8 +713,9 @@ export default function Dashboard() {
                   <Activity className="w-8 h-8 text-purple-600" />
                   <h2 className="text-3xl font-black text-gray-900">Smart Analysis</h2>
                 </div>
+
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  {/* Priority */}
+                  {/* Priority breakdown */}
                   <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-2xl p-6 border-2 border-blue-200">
                     <h3 className="font-bold text-xl text-gray-900 mb-5 flex items-center gap-2">
                       <PieChart className="w-6 h-6 text-blue-600" /> Priority Distribution
@@ -632,14 +734,16 @@ export default function Dashboard() {
                           <div className="flex items-center gap-3">
                             <span className="text-2xl font-bold text-gray-900">{item.count}</span>
                             <div className="w-32 h-3 bg-gray-200 rounded-full overflow-hidden">
-                              <div className={`h-full ${item.color} rounded-full`} style={{ width: `${activeTasks > 0 ? (item.count / activeTasks * 100) : 0}%` }} />
+                              <div className={`h-full ${item.color} rounded-full`}
+                                style={{ width: `${totalTasks > 0 ? (item.count / totalTasks * 100) : 0}%` }} />
                             </div>
                           </div>
                         </div>
                       ))}
                     </div>
                   </div>
-                  {/* Category */}
+
+                  {/* Category breakdown */}
                   <div className="bg-gradient-to-br from-purple-50 to-pink-50 rounded-2xl p-6 border-2 border-purple-200">
                     <h3 className="font-bold text-xl text-gray-900 mb-5 flex items-center gap-2">
                       <TrendingUp className="w-6 h-6 text-purple-600" /> Category Distribution
@@ -661,7 +765,8 @@ export default function Dashboard() {
                           <div className="flex items-center gap-3">
                             <span className="text-2xl font-bold text-gray-900">{count}</span>
                             <div className="w-32 h-3 bg-gray-200 rounded-full overflow-hidden">
-                              <div className={`h-full ${color} rounded-full`} style={{ width: `${activeTasks > 0 ? (count / activeTasks * 100) : 0}%` }} />
+                              <div className={`h-full ${color} rounded-full`}
+                                style={{ width: `${totalTasks > 0 ? (count / totalTasks * 100) : 0}%` }} />
                             </div>
                           </div>
                         </div>
@@ -669,7 +774,8 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </div>
-                {/* Progress */}
+
+                {/* Completion rate */}
                 <div className="mt-6 bg-gradient-to-br from-green-50 to-teal-50 rounded-2xl p-6 border-2 border-green-200">
                   <h3 className="font-bold text-xl text-gray-900 mb-4 flex items-center gap-2">
                     <Target className="w-6 h-6 text-green-600" /> Overall Progress
@@ -679,7 +785,8 @@ export default function Dashboard() {
                     <span className="text-4xl font-black text-green-600">{completionRate}%</span>
                   </div>
                   <div className="w-full h-4 bg-gray-200 rounded-full overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-green-500 to-teal-500 rounded-full transition-all duration-500" style={{ width: `${completionRate}%` }} />
+                    <div className="h-full bg-gradient-to-r from-green-500 to-teal-500 rounded-full transition-all duration-500"
+                      style={{ width: `${completionRate}%` }} />
                   </div>
                   <div className="grid grid-cols-2 gap-4 mt-6">
                     <div className="bg-white rounded-xl p-4 border-2 border-green-200">
@@ -695,6 +802,7 @@ export default function Dashboard() {
               </div>
             </div>
           )}
+
         </div>
       </div>
     </div>
