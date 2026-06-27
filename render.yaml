@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ai-task-manager
+    env: node
+    branch: main
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false  # You'll enter this manually in Render dashboard
