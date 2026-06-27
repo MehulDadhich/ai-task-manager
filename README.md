@@ -30,8 +30,6 @@
 
 ---
 
-## 🖥️ Screenshots
-
 ### Login Page
 - Animated blue particle network on white background
 - Split layout: feature highlights on left, auth card on right
@@ -337,13 +335,3 @@ Set these environment variables in Vercel dashboard (same as your `.env`).
 | `Cannot GET /` on backend | Normal — open `localhost:5000/api/health` to confirm backend is alive |
 
 ---
-
-## 📄 License
-
-MIT — free to use, modify, and deploy.
-
----
-
-<div align="center">
-  Built with ❤️ using React, Firebase, and Google Gemini AI
-</div>
